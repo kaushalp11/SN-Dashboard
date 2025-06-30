@@ -20,7 +20,7 @@ DAY_FIRST_TRUE_COLS = ['Opened', 'Resolved', 'Closed']
 LLM_PROVIDER = "groq"
 # --- Page Configuration ---
 st.set_page_config(
-    page_title="ServiceNow Advanced Dashboard",
+    page_title="ServiceNow CSM Operational KPI Dashboard",
     page_icon="📊",
     layout="wide"
 )
@@ -434,7 +434,7 @@ def format_period_label(date_obj, freq):
 
 
 # --- Main Application ---
-st.title("📊 ServiceNow Advanced Analysis Dashboard")
+st.title("📊 ServiceNow CSM Operational KPI Dashboard")
 st.markdown("Upload your ServiceNow data export (Excel format) to visualize key metrics and trends.")
 
 uploaded_file = st.file_uploader("Choose an Excel file (.xlsx)", type="xlsx")
