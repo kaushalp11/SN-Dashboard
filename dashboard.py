@@ -474,12 +474,13 @@ if df_original is not None and not df_original.empty:
         f"Specific {selected_time_slice_global_label}:", options=st.session_state.global_periods, index=0, key='global_period',
         on_change=clear_genai_summaries_session_state # Call helper function
     )
-    selected_region_global = 'All Regions'
+    selected_regions_global = [] # Use a list for multi-select
     if 'Region' in df_original.columns:
         if 'global_regions' not in st.session_state:
-             st.session_state.global_regions = ['All Regions'] + sorted(df_original['Region'].dropna().unique().tolist())
-        selected_region_global = st.sidebar.selectbox(
-            "Region:", options=st.session_state.global_regions, index=0, key='global_region',
+             # For multiselect, we don't need 'All Regions' in the options list
+             st.session_state.global_regions = sorted(df_original['Region'].dropna().unique().tolist())
+        selected_regions_global = st.sidebar.multiselect(
+            "Regions:", options=st.session_state.global_regions, default=[], key='global_region_multi',
             on_change=clear_genai_summaries_session_state # Call helper function
         )
     else: st.sidebar.info("'Region' column not found. Region filter disabled.")
@@ -501,11 +502,11 @@ if df_original is not None and not df_original.empty:
         global_filters_applied_list.append(f"Accounts: {', '.join(selected_accounts_global)}")
     elif 'Account' in df_filtered_global.columns : global_filters_applied_list.append("Accounts: All")
     else: global_filters_applied_list.append("Accounts: N/A (column missing)")
-    if selected_region_global != 'All Regions' and 'Region' in df_filtered_global.columns:
-        df_filtered_global = df_filtered_global[df_filtered_global['Region'] == selected_region_global]
-        global_filters_applied_list.append(f"Region: {selected_region_global}")
-    elif 'Region' in df_filtered_global.columns: global_filters_applied_list.append("Region: All Regions")
-    else: global_filters_applied_list.append("Region: N/A (column missing)")
+    if selected_regions_global and 'Region' in df_filtered_global.columns:
+        df_filtered_global = df_filtered_global[df_filtered_global['Region'].isin(selected_regions_global)]
+        global_filters_applied_list.append(f"Regions: {', '.join(selected_regions_global)}")
+    elif 'Region' in df_filtered_global.columns: global_filters_applied_list.append("Regions: All")
+    else: global_filters_applied_list.append("Regions: N/A (column missing)")
     if selected_period_global != 'N/A':
         period_freq_global = freq_global if freq_global != 'Y' else 'A-DEC'
         time_col_present = global_time_col in df_filtered_global.columns and not df_filtered_global[global_time_col].isnull().all()
@@ -591,18 +592,22 @@ if df_original is not None and not df_original.empty:
             local_filters_applied_list.append("Period: N/A (Date col missing)")
 
         # Region
-        selected_region = 'All Regions'
+                # Region (Multi-select)
+        selected_regions = []
         if allow_region and 'Region' in df_local.columns:
             if col_idx >= len(cols_main):
                 cols_main.extend(st.columns(min(3, num_filters_enabled - col_idx)))
             with cols_main[col_idx]:
-                selected_region = st.selectbox("Region (Local):", ['All Regions'] + all_regions, index=0, key=f'{chart_id_prefix}_reg', on_change=clear_genai_summaries_session_state, disabled=(not all_regions))
-            if selected_region != 'All Regions':
-                df_local = df_local[df_local['Region'] == selected_region]
-            local_filters_applied_list.append(f"Region: {selected_region}")
+                # We don't need 'All Regions' in the multiselect list itself
+                selected_regions = st.multiselect("Regions (Local):", all_regions, default=[], key=f'{chart_id_prefix}_reg_multi', on_change=clear_genai_summaries_session_state, disabled=(not all_regions))
+            if selected_regions: # An empty list means 'All'
+                df_local = df_local[df_local['Region'].isin(selected_regions)]
+                local_filters_applied_list.append(f"Regions: {', '.join(selected_regions)}")
+            else:
+                local_filters_applied_list.append("Regions: All")
             col_idx += 1
         elif allow_region:
-            local_filters_applied_list.append("Region: N/A (column missing)")
+            local_filters_applied_list.append("Regions: N/A (column missing)")
 
         # Account
         selected_accounts = []
@@ -1073,6 +1078,143 @@ if df_original is not None and not df_original.empty:
         "y_col": "Count",
         "value_col": None,
         "name_col": None
+    })
+    st.markdown("---")
+        # --- NEW: Advanced Open Ticket Aging Analysis ---
+    st.subheader("2.5.1 Advanced Open Ticket Aging Analysis")
+    st.caption("The following charts break down the open ticket aging distribution by different dimensions like Region, Priority, and Account to identify specific areas with aging backlogs.")
+
+    # We can reuse the same local filter set for all advanced aging charts.
+    # This ensures consistency for this sub-section.
+    df_add8_adv_local, lfilt_add8_adv_desc, _, _, _ = apply_local_filters(
+        df_filtered_global, 'add8_adv', 'Opened',
+        allow_time_slice=True, allow_period=True, allow_region=True, allow_account=True, # Note: region filter is now multi-select
+        allow_priority=True, allow_state=False, allow_category=True, allow_subcategory=True
+    )
+    local_filters_desc_map['add8_adv_common'] = lfilt_add8_adv_desc # Common filter description for this section
+
+    # --- Core Aging Calculation Logic (reused for all sub-charts) ---
+    open_aging_adv_df = None
+    if 'State' in df_add8_adv_local.columns and 'Opened' in df_add8_adv_local.columns and 'Task' in df_add8_adv_local.columns:
+        temp_df = df_add8_adv_local[~df_add8_adv_local['State'].isin(CLOSED_STATES_LIST)].copy()
+        if not temp_df.empty:
+            temp_df['Opened'] = pd.to_datetime(temp_df['Opened'],errors='coerce',dayfirst=('Opened' in DAY_FIRST_TRUE_COLS))
+            temp_df = temp_df.dropna(subset=['Opened'])
+            if not temp_df.empty:
+                now_utc = datetime.now(timezone.utc)
+                temp_df['Opened_utc'] = temp_df['Opened'].dt.tz_localize('UTC',ambiguous='NaT',nonexistent='NaT') if temp_df['Opened'].dt.tz is None else temp_df['Opened'].dt.tz_convert('UTC')
+                temp_df = temp_df.dropna(subset=['Opened_utc'])
+                if not temp_df.empty:
+                    temp_df['Age (Days)'] = (now_utc - temp_df['Opened_utc']).dt.total_seconds()/(60*60*24)
+                    temp_df = temp_df[temp_df['Age (Days)']>=0]
+                    bins = [0,1,3,7,14,30,np.inf]; labels = ['0-1 Day','1-3 Days','3-7 Days','7-14 Days','14-30 Days','30+ Days']
+                    temp_df['Age Bin'] = pd.cut(temp_df['Age (Days)'],bins=bins,labels=labels,right=False)
+                    open_aging_adv_df = temp_df.copy() # This is the base df for our new charts
+
+    # --- Chart: Aging by Region ---
+    st.markdown("###### Open Ticket Aging by Region")
+    p_add8_reg, b_add8_reg = "Break down open ticket aging by geographical region.", "Highlights which regions are struggling with older tickets, informing targeted interventions."
+    st.caption(f"**Purpose:** {p_add8_reg} / **Benefit:** {b_add8_reg}")
+
+    fig_add8_region = None
+    aging_by_region_df = None
+    fig_add8_region_title = "Open Ticket Aging by Region"
+
+    if open_aging_adv_df is not None and 'Region' in open_aging_adv_df.columns:
+        aging_by_region_df = open_aging_adv_df.groupby(['Age Bin', 'Region'], observed=False)['Task'].nunique().reset_index(name='Count')
+        if not aging_by_region_df.empty:
+            fig_add8_region = px.bar(aging_by_region_df, x='Age Bin', y='Count', color='Region',
+                                     title=fig_add8_region_title, barmode='stack',
+                                     labels={'Count': 'Number of Open Tickets', 'Age Bin': 'Ticket Age'},
+                                     color_discrete_sequence=px.colors.qualitative.Vivid)
+            fig_add8_region.update_layout(xaxis_title="Ticket Age", yaxis_title="Number of Open Tickets")
+            display_chart_with_genai(fig_add8_region, aging_by_region_df, fig_add8_region_title, p_add8_reg, b_add8_reg, "add8_region", chart_type="bar", x_col="Age Bin", y_col="Count")
+        else:
+            st.info("No data to display for aging by region with current filters.")
+    else:
+        st.info("Required data for 'Aging by Region' (e.g., 'Region', 'State', 'Opened') is missing or filtered out.")
+
+    figures_for_export.append({
+        "title": fig_add8_region_title, "object": fig_add8_region, "req_id": "add8_region",
+        "purpose": p_add8_reg, "benefit": b_add8_reg, "chart_df": aging_by_region_df,
+        "chart_type": "bar", "x_col": "Age Bin", "y_col": "Count", "name_col": "Region"
+    })
+    st.markdown("---")
+
+    # --- Chart: Aging by Priority ---
+    st.markdown("###### Open Ticket Aging by Priority")
+    p_add8_prio, b_add8_prio = "Analyze the age of open tickets based on their priority level.", "Identifies if high-priority tickets are being left unresolved, signaling potential process failures."
+    st.caption(f"**Purpose:** {p_add8_prio} / **Benefit:** {b_add8_prio}")
+
+    fig_add8_prio = None
+    aging_by_prio_df = None
+    fig_add8_prio_title = "Open Ticket Aging by Priority"
+
+    if open_aging_adv_df is not None and 'Priority' in open_aging_adv_df.columns:
+        aging_by_prio_df = open_aging_adv_df.groupby(['Age Bin', 'Priority'], observed=False)['Task'].nunique().reset_index(name='Count')
+        if not aging_by_prio_df.empty:
+            # Sort priorities logically
+            try:
+                aging_by_prio_df['SortKey']=aging_by_prio_df['Priority'].astype(str).str.extract(r'(\d+)').astype(int)
+                priority_order = aging_by_prio_df.sort_values('SortKey')['Priority'].unique()
+            except:
+                priority_order = sorted(aging_by_prio_df['Priority'].unique())
+
+            fig_add8_prio = px.bar(aging_by_prio_df, x='Age Bin', y='Count', color='Priority',
+                                   title=fig_add8_prio_title, barmode='stack',
+                                   category_orders={"Priority": priority_order},
+                                   labels={'Count': 'Number of Open Tickets', 'Age Bin': 'Ticket Age'},
+                                   color_discrete_sequence=px.colors.qualitative.Bold)
+            fig_add8_prio.update_layout(xaxis_title="Ticket Age", yaxis_title="Number of Open Tickets")
+            display_chart_with_genai(fig_add8_prio, aging_by_prio_df, fig_add8_prio_title, p_add8_prio, b_add8_prio, "add8_prio", chart_type="bar", x_col="Age Bin", y_col="Count")
+        else:
+            st.info("No data to display for aging by priority with current filters.")
+    else:
+        st.info("Required data for 'Aging by Priority' (e.g., 'Priority', 'State', 'Opened') is missing or filtered out.")
+
+    figures_for_export.append({
+        "title": fig_add8_prio_title, "object": fig_add8_prio, "req_id": "add8_prio",
+        "purpose": p_add8_prio, "benefit": b_add8_prio, "chart_df": aging_by_prio_df,
+        "chart_type": "bar", "x_col": "Age Bin", "y_col": "Count", "name_col": "Priority"
+    })
+    st.markdown("---")
+
+    # --- Chart: Aging by Top N Accounts ---
+    st.markdown("###### Open Ticket Aging by Top N Accounts")
+    p_add8_acc, b_add8_acc = "Visualize aging tickets for the most active accounts.", "Focuses attention on key customers who may be experiencing service degradation due to old tickets."
+    st.caption(f"**Purpose:** {p_add8_acc} / **Benefit:** {b_add8_acc}")
+
+    fig_add8_acc = None
+    aging_by_acc_df = None
+    fig_add8_acc_title = "Open Ticket Aging by Top N Accounts" # Default
+
+    if open_aging_adv_df is not None and 'Account' in open_aging_adv_df.columns:
+        # Determine Top N accounts based on the number of OPEN tickets
+        top_n_accounts = st.slider("Select Top N Accounts to Display:", min_value=3, max_value=20, value=10, key="add8_top_n_slider")
+        top_accounts_list = open_aging_adv_df['Account'].value_counts().nlargest(top_n_accounts).index.tolist()
+        
+        # Filter the aging dataframe for only these top accounts
+        filtered_aging_for_accounts = open_aging_adv_df[open_aging_adv_df['Account'].isin(top_accounts_list)]
+        
+        aging_by_acc_df = filtered_aging_for_accounts.groupby(['Age Bin', 'Account'], observed=False)['Task'].nunique().reset_index(name='Count')
+
+        if not aging_by_acc_df.empty:
+            fig_add8_acc_title = f"Open Ticket Aging by Top {top_n_accounts} Accounts"
+            fig_add8_acc = px.bar(aging_by_acc_df, x='Age Bin', y='Count', color='Account',
+                                  title=fig_add8_acc_title, barmode='stack',
+                                  labels={'Count': 'Number of Open Tickets', 'Age Bin': 'Ticket Age'},
+                                  color_discrete_sequence=px.colors.qualitative.Alphabet)
+            fig_add8_acc.update_layout(xaxis_title="Ticket Age", yaxis_title="Number of Open Tickets")
+            display_chart_with_genai(fig_add8_acc, aging_by_acc_df, fig_add8_acc_title, p_add8_acc, b_add8_acc, "add8_account", chart_type="bar", x_col="Age Bin", y_col="Count")
+        else:
+            st.info("No data to display for aging by account with current filters.")
+    else:
+        st.info("Required data for 'Aging by Account' (e.g., 'Account', 'State', 'Opened') is missing or filtered out.")
+
+    figures_for_export.append({
+        "title": fig_add8_acc_title, "object": fig_add8_acc, "req_id": "add8_account",
+        "purpose": p_add8_acc, "benefit": b_add8_acc, "chart_df": aging_by_acc_df,
+        "chart_type": "bar", "x_col": "Age Bin", "y_col": "Count", "name_col": "Account"
     })
     st.markdown("---")
 
